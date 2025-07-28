@@ -1,0 +1,8 @@
+[project]
+name = "musescorescrapper"
+version = "0.1.0"
+description = "A scrapper that allows you to download scores from musescore instead of doing screenshots."
+requires-python = ">=3.13"
+dependencies = [
+    "playwright>=1.54.0",
+]
