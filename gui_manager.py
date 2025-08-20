@@ -1,7 +1,5 @@
 import asyncio
 import logging
-import os
-import platform
 import re
 import sys
 from pathlib import Path, UnsupportedOperation
@@ -25,25 +23,6 @@ button_status = 0b00
 
 def update_button_status(button: QPushButton):
     button.setEnabled(button_status == 0b11)
-
-
-def get_desktop_file(filename: str = "partition.pdf") -> str:
-    if platform.system() == "Windows":
-        desktop = Path.home() / "Desktop"
-        if not desktop.exists():
-            desktop = Path.home() / "Bureau"
-    elif platform.system() == "Darwin":
-        desktop = Path.home() / "Desktop"
-    else:
-        desktop_dir = os.getenv("XDG_DESKTOP_DIR")
-        if desktop_dir:
-            desktop = Path(desktop_dir)
-        else:
-            desktop = Path.home() / "Desktop"
-            if not desktop.exists():
-                desktop = Path.home() / "Bureau"
-
-    return str(desktop / filename)
 
 
 class MainWindow(QMainWindow):
@@ -77,19 +56,17 @@ class MainWindow(QMainWindow):
             directory = QFileDialog.getExistingDirectory(
                 self,
                 "Choisir un dossier de destination",
-                self.path_entry.text() or QStandardPaths.writableLocation(
-                    QStandardPaths.StandardLocation.DocumentsLocation),
+                self.path_entry.text() or QStandardPaths.writableLocation(settings.DEFAULT_FOLDER_LOCATION),
                 options=QFileDialog.Option.ShowDirsOnly,
             )
             if directory:
                 file = self.path_entry.text().split("/")[-1]
-                self.path_entry.setText(os.path.join(directory, file))
+                self.path_entry.setText(str(Path(directory) / file))
         else:
             file_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Choisir un fichier de sortie",
-                self.path_entry.text() or QStandardPaths.writableLocation(
-                    QStandardPaths.StandardLocation.DocumentsLocation),
+                self.path_entry.text() or QStandardPaths.writableLocation(settings.DEFAULT_FOLDER_LOCATION),
             )
             if file_path:
                 self.path_entry.setText(file_path)
@@ -189,7 +166,7 @@ class MainWindow(QMainWindow):
 
         self.status_debounce = QTimer(self)
         self.status_debounce.setSingleShot(True)
-        self.status_debounce.setInterval(500)  # ms
+        self.status_debounce.setInterval(settings.FETCH_TITLE_DEBOUNCE_MS)
         self.status_debounce.timeout.connect(self.fetch_title)
 
         self.preview_title_label = QLabel("Veuillez saisir une adresse", self)
@@ -218,7 +195,8 @@ class MainWindow(QMainWindow):
         save_layout_vertical.addLayout(save_label_layout)
 
         self.path_entry = QLineEdit()
-        self.path_entry.setText(get_desktop_file())
+        self.path_entry.setText(str(Path(QStandardPaths.writableLocation(settings.DEFAULT_FOLDER_LOCATION))
+                                    / settings.DEFAULT_FILE_NAME))
         self.previous_path = self.path_entry.text()
         self.path_entry.textChanged.connect(self.check_path)
         save_layout_vertical.addWidget(self.path_entry)
@@ -236,7 +214,7 @@ class MainWindow(QMainWindow):
         # Auto option section
         auto_output_layout = QHBoxLayout()
         self.auto_output = QCheckBox()
-        self.auto_output.setChecked(True)
+        self.auto_output.setChecked(settings.DEFAULT_AUTO_TITLE_MODE)
         auto_output_label = QLabel("Sortie automatique")
         auto_output_label.setFont(QFont("Default", 12))
         self.auto_output.stateChanged.connect(self.handle_auto_output)
@@ -327,7 +305,6 @@ class GUIManager(QApplication):
                 logger.warning(f"Preview title failed: {e}")
                 self.window.preview_title_label.setText("Erreur lors du chargement du titre")
             finally:
-                # Cacher le spinner si présent
                 self.window.preview_spinner.setVisible(False)
 
         if self._preview_task and not self._preview_task.done():
