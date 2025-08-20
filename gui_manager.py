@@ -1,107 +1,30 @@
+import asyncio
 import logging
 import os
-from pathlib import Path, UnsupportedOperation
 import platform
 import re
-import tkinter as tk
-from tkinter import filedialog
-from typing import Any
+import sys
+from pathlib import Path, UnsupportedOperation
+
+import PySide6.QtAsyncio as QtAsyncio
+from PySide6.QtCore import Qt, QTimer, QStandardPaths
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPushButton, QFileDialog, QSpacerItem, QSizePolicy,
+    QProgressBar, QCheckBox
+)
 
 import settings
+from page_manager import PageManagerWorker
 
 logger = logging.getLogger(__name__)
 
 button_status = 0b00
 
 
-def add_placeholder(entry: tk.Entry, var: tk.StringVar, placeholder_text: str):
-    default_fg_color = entry.cget("fg")
-
-    def on_focus_in(*_):
-        if entry.get() == placeholder_text:
-            var.set("")
-            entry.config(fg=default_fg_color)
-
-    def on_focus_out(*_):
-        if not entry.get():
-            entry.insert(0, placeholder_text)
-            entry.config(fg="grey")
-
-    on_focus_out()
-
-    entry.bind("<FocusIn>", on_focus_in)
-    entry.bind("<FocusOut>", on_focus_out)
-
-
-def update_button_status(button: tk.Button):
-    if button_status == 0b11:
-        button.config(state="normal")
-    else:
-        button.config(state="disabled")
-
-
-def add_url_typing_listener(var: tk.StringVar, button: tk.Button, type_label: tk.Label):
-    url_patterns = [
-        ("score utilisateur", re.compile(r"^https://(?:www\.)?musescore\.com/user/[0-9]+/scores/[0-9]+$"))  ,
-        ("score officiel", re.compile(r"^https://(?:www\.)?musescore\.com/official_scores/scores/[0-9]+$")),
-        ("autre site", re.compile(r"^https://[a-zA-Z0-9\-.]+\.[a-z]{2,}/.*$"))
-    ]
-
-    def get_match_type(url: str):
-        for match_type, pattern in url_patterns:
-            if pattern.match(url):
-                return match_type
-        return None
-
-    def on_variable_change(*_):
-        global button_status
-        if match_type := get_match_type(var.get()):
-            button_status |= 0b10
-            type_label.config(text=f"Type : {match_type}", fg="grey")
-        else:
-            button_status &= 0b01
-            type_label.config(text="URL invalide", fg="red")
-        update_button_status(button)
-    var.trace_add("write", on_variable_change)
-
-
-def add_path_typing_listener(var: tk.StringVar, button: tk.Button, path_valid_label: tk.Label):
-    def is_valid_path(path: str):
-        try:
-            path = Path(path)
-        except UnsupportedOperation:
-            return False
-        else:
-            if path.exists() and path.is_dir():
-                return False
-            if not path.parent.exists():
-                return False
-            if path.suffix != ".pdf":
-                return False
-            return True
-
-    def on_variable_change(*_):
-        global button_status
-        if is_valid_path(var.get()):
-            button_status |= 0b01
-            path_valid_label.config(text="Chemin valide", fg="green")
-        else:
-            button_status &= 0b10
-            path_valid_label.config(text="Chemin invalide", fg="red")
-        update_button_status(button)
-    var.trace_add("write", on_variable_change)
-    on_variable_change()
-
-def browse_save_location(save_path_var: tk.StringVar):
-    initial_dir = os.path.dirname(save_path_var.get())
-    file_path = filedialog.asksaveasfilename(
-        defaultextension=".pdf",
-        filetypes=[("PDF files", "*.pdf")],
-        initialdir=initial_dir,
-        initialfile="partition.pdf"
-    )
-    if file_path:
-        save_path_var.set(file_path)
+def update_button_status(button: QPushButton):
+    button.setEnabled(button_status == 0b11)
 
 
 def get_desktop_file(filename: str = "partition.pdf") -> str:
@@ -123,171 +46,296 @@ def get_desktop_file(filename: str = "partition.pdf") -> str:
     return str(desktop / filename)
 
 
-class GUIElement:
-    __slots__ = ("widget",)
-
-    def __init__(
-            self,
-            widget_class: str,
-            init_args: dict[str, Any] | None = None,
-            display_method: str | None = "pack",
-            display_args: dict[str, Any] | None = None):
-        self.widget = getattr(tk, widget_class)(**init_args)
-        if display_method is not None:
-            getattr(self.widget, display_method)(**display_args)
-
-
-class GUIManager(tk.Tk):
-    def __init__(self):
+class MainWindow(QMainWindow):
+    def __init__(self, app):
         super().__init__()
-        self.running = False
-        self.visual_elements: dict[str, tk.Widget | tk.Variable] = {}
-        self.result_url: str | None = None
-        self.result_path: str | None = None
+        self.app = app
+        self.url_type_label: QLabel | None = None
+        self.path_valid_label: QLabel | None = None
+        self.validate_button: QPushButton | None = None
+        self.url_entry: QLineEdit | None = None
+        self.path_entry: QLineEdit | None = None
+        self.status_debounce: QTimer | None = None
+        self.preview_title_label: QLabel | None = None
+        self.preview_spinner: QProgressBar | None = None
+        self.auto_output: QCheckBox | None = None
+        self.previous_path: str | None = None
 
-    def init(self):
-        if self.running:
-            return
-        logger.info("Initialising the GUI")
-        self.title("MuseScore scrapper")
-        self.geometry(settings.WINDOW_GEOMETRY)
-        self.resizable(False, False)
-        self.protocol("WM_DELETE_WINDOW", self.cancel)
-
+        self.setWindowTitle("MuseScore scrapper")
+        self.setFixedSize(settings.WINDOW_GEOMETRY[0], settings.WINDOW_GEOMETRY[1])
         self.build_gui()
-        self.center_window(self)
-        self.running = True
+        self.center_window()
 
-    def close(self):
-        if not self.running:
-            return
-        logger.info("Closing the GUI")
-        if hasattr(self, '_tclCommands') and self._tclCommands:
-            self.destroy()
-        self.quit()
-        self.update()
-        self.running = False
+    def scrap(self):
+        asyncio.ensure_future(self.app.scrap())
 
-    def cancel(self):
-        logger.info("Canceling the process")
-        self.close()
+    def fetch_title(self):
+        self.app.fetch_title()
 
-    def validate(self, *_):
-        self.result_url = self.visual_elements["link_var"].get()
-        self.result_path = self.visual_elements["save_path_var"].get()
-        logger.info(f"URL validated : {self.result_url}")
-        logger.info(f"Path validated : {self.result_path}")
-        self.close()
+    def browse_save_location(self):
+        if getattr(self, "auto_output", None) and self.auto_output.isChecked():
+            directory = QFileDialog.getExistingDirectory(
+                self,
+                "Choisir un dossier de destination",
+                self.path_entry.text() or QStandardPaths.writableLocation(
+                    QStandardPaths.StandardLocation.DocumentsLocation),
+                options=QFileDialog.Option.ShowDirsOnly,
+            )
+            if directory:
+                file = self.path_entry.text().split("/")[-1]
+                self.path_entry.setText(os.path.join(directory, file))
+        else:
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Choisir un fichier de sortie",
+                self.path_entry.text() or QStandardPaths.writableLocation(
+                    QStandardPaths.StandardLocation.DocumentsLocation),
+            )
+            if file_path:
+                self.path_entry.setText(file_path)
+        self.check_path(self.path_entry.text())
+
+    def check_url(self, text: str):
+        url_patterns = [
+            ("score utilisateur", re.compile(r"^https://(?:www\.)?musescore\.com/user/[0-9]+/scores/[0-9]+$")),
+            ("score officiel", re.compile(r"^https://(?:www\.)?musescore\.com/official_scores/scores/[0-9]+$")),
+            ("autre site", re.compile(r"^https://[a-zA-Z0-9\-.]+\.[a-z]{2,}/.*$"))
+        ]
+
+        global button_status
+        for match_type, pattern in url_patterns:
+            if pattern.match(text):
+                button_status |= 0b10
+                self.url_type_label.setText(f"Type : {match_type}")
+                self.url_type_label.setStyleSheet("color: gray")
+
+                self.app.result_url = self.url_entry.text()
+                self.status_debounce.start()
+                break
+        else:
+            button_status &= 0b01
+            self.url_type_label.setText("URL invalide")
+            self.url_type_label.setStyleSheet("color: red")
+
+        update_button_status(self.validate_button)
+
+    def check_path(self, text: str):
+        try:
+            path = Path(text)
+            is_valid = (
+                not (path.exists() and path.is_dir()) and
+                path.parent.exists() and
+                path.suffix == ".pdf"
+            )
+        except UnsupportedOperation:
+            is_valid = False
+
+        global button_status
+        if is_valid:
+            button_status |= 0b01
+            self.path_valid_label.setText("Chemin valide")
+            self.path_valid_label.setStyleSheet("color: green")
+
+            self.app.result_path = self.path_entry.text()
+        else:
+            button_status &= 0b10
+            self.path_valid_label.setText("Chemin invalide")
+            self.path_valid_label.setStyleSheet("color: red")
+
+        update_button_status(self.validate_button)
+
+    def handle_auto_output(self, state):
+        if state == Qt.CheckState.Checked.value:
+            self.previous_path = self.path_entry.text()
+
+            current_title = self.preview_title_label.text()
+            if current_title and current_title not in ["Veuillez saisir une adresse", "Erreur lors du chargement du titre", "—", ""]:
+                self.update_path_with_title(current_title)
+        else:
+            if self.previous_path:
+                self.path_entry.setText(self.previous_path)
+
+    def update_path_with_title(self, title):
+        if self.auto_output and self.auto_output.isChecked():
+            # Nettoyer le titre pour en faire un nom de fichier valide
+            clean_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
+            current_path = Path(self.path_entry.text())
+            new_path = current_path.parent / f"{clean_title}.pdf"
+            self.path_entry.setText(str(new_path))
 
     def build_gui(self):
-        frame = self.visual_elements["frame"] = GUIElement(
-            widget_class="Frame",
-            init_args={"master": self},
-            display_args={"expand": True}
-        ).widget
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
 
-        # URL selector
-        ## Labels
-        label_frame = self.visual_elements["label_frame"] = GUIElement(
-            widget_class="Frame",
-            init_args={"master": frame},
-            display_args={"side": tk.TOP, "fill": tk.X}
-        ).widget
-        self.visual_elements["url_label"] = GUIElement(
-            widget_class="Label",
-            init_args={"master": label_frame, "text": "Page Musescore à extraire :", "font": ("TkDefaultFont", 9, "bold")},
-            display_args={"side": tk.LEFT, "anchor": tk.W}
-        ).widget
-        type_label = self.visual_elements["type_label"] = GUIElement(
-            widget_class="Label",
-            init_args={"master": label_frame, "text": "URL invalide", "fg": "red"},
-            display_args={"side": tk.RIGHT, "anchor": tk.E}
-        ).widget
+        # URL section
+        url_label_layout = QHBoxLayout()
+        url_label = QLabel("Page Musescore à extraire :")
+        url_label.setFont(QFont("Default", 12, QFont.Weight.Bold))
+        self.url_type_label = QLabel("URL invalide")
+        self.url_type_label.setStyleSheet("color: red")
+        url_label_layout.addWidget(url_label)
+        url_label_layout.addWidget(self.url_type_label, alignment=Qt.AlignmentFlag.AlignRight)
+        main_layout.addLayout(url_label_layout)
 
-        ## Entry
-        link_var = self.visual_elements["link_var"] = tk.StringVar(self)
-        link_entry = self.visual_elements["link_entry"] = GUIElement(
-            widget_class="Entry",
-            init_args={"master": frame, "textvariable": link_var},
-            display_args={"side": tk.TOP, "anchor": tk.W, "fill": tk.X}
-        ).widget
-        add_placeholder(link_entry, link_var, settings.ENTRY_PLACEHOLDER)
-        link_entry.bind("<Return>", self.validate)
+        self.url_entry = QLineEdit()
+        self.url_entry.setPlaceholderText(settings.ENTRY_PLACEHOLDER)
+        self.url_entry.textChanged.connect(self.check_url)
+        self.url_entry.returnPressed.connect(self.scrap)
+        main_layout.addWidget(self.url_entry)
 
-        # Save selector
-        ## Labels
-        save_label_frame = self.visual_elements["save_label_frame"] = GUIElement(
-            widget_class="Frame",
-            init_args={"master": frame},
-            display_args={"side": tk.TOP, "fill": tk.X}
-        ).widget
-        self.visual_elements["save_label"] = GUIElement(
-            widget_class="Label",
-            init_args={"master": save_label_frame, "text": "Sauvegarder dans :", "font": ("TkDefaultFont", 9, "bold")},
-            display_args={"side": tk.LEFT, "anchor": tk.W}
-        ).widget
-        path_valid_label = self.visual_elements["path_valid_label"] = GUIElement(
-            widget_class="Label",
-            init_args={"master": save_label_frame, "text": "Chemin invalide", "fg": "red"},
-            display_args={"side": tk.RIGHT, "anchor": tk.E}
-        ).widget
+        # Status section
+        status_layout = QHBoxLayout()
 
-        ## Entry
-        save_frame = self.visual_elements["save_frame"] = GUIElement(
-            widget_class="Frame",
-            init_args={"master": frame},
-            display_args={"side": tk.TOP}
-        ).widget
-        save_path_var = self.visual_elements["save_path_var"] = tk.StringVar(value=get_desktop_file())
-        self.visual_elements["save_entry"] = GUIElement(
-            widget_class="Entry",
-            init_args={"master": save_frame, "textvariable": save_path_var, "width": 45},
-            display_args={"side": tk.LEFT}
-        ).widget
+        self.status_debounce = QTimer(self)
+        self.status_debounce.setSingleShot(True)
+        self.status_debounce.setInterval(500)  # ms
+        self.status_debounce.timeout.connect(self.fetch_title)
 
-        ## Browse button
-        self.visual_elements["browse_button"] = GUIElement(
-            widget_class="Button",
-            init_args={
-                "master": save_frame,
-                "text": "📁",
-                "command": lambda: browse_save_location(save_path_var),
-                "width": 1,
-            },
-            display_args={"side": tk.LEFT, "padx": (5, 0), "fill": tk.Y}
-        ).widget
+        self.preview_title_label = QLabel("Veuillez saisir une adresse", self)
+        self.preview_title_label.setStyleSheet("color: cyan")
+        self.preview_title_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        status_layout.addWidget(self.preview_title_label)
 
-        # Validate button
-        commands_frame = self.visual_elements["commands_frame"] = GUIElement(
-            widget_class="Frame",
-            init_args={"master": frame},
-            display_args={"side": tk.TOP, "pady": (5, 0)}
-        ).widget
-        self.visual_elements["cancel_button"] = GUIElement(
-            widget_class="Button",
-            init_args={"master": commands_frame, "text": "Annuler", "command": self.cancel},
-            display_args={"side": tk.LEFT, "padx": 5}
-        ).widget
-        validate_button = self.visual_elements["validate_button"] = GUIElement(
-            widget_class="Button",
-            init_args={"master": commands_frame, "text": "Récupérer", "command": self.validate, "state": tk.DISABLED},
-            display_args={"side": tk.RIGHT, "padx": 5}
-        ).widget
-        add_url_typing_listener(link_var, validate_button, type_label)
-        add_path_typing_listener(save_path_var, validate_button, path_valid_label)
+        self.preview_spinner = QProgressBar(self)
+        self.preview_spinner.setRange(0, 0)
+        self.preview_spinner.setTextVisible(False)
+        self.preview_spinner.setVisible(False)
+        status_layout.addWidget(self.preview_spinner)
+
+        main_layout.addLayout(status_layout)
+
+        # Save section
+        save_layout = QHBoxLayout()
+        save_layout_vertical = QVBoxLayout()
+        save_label_layout = QHBoxLayout()
+        save_label = QLabel("Sauvegarder dans :")
+        save_label.setFont(QFont("Default", 12, QFont.Weight.Bold))
+        self.path_valid_label = QLabel("Chemin invalide")
+        self.path_valid_label.setStyleSheet("color: red")
+        save_label_layout.addWidget(save_label)
+        save_label_layout.addWidget(self.path_valid_label, alignment=Qt.AlignmentFlag.AlignRight)
+        save_layout_vertical.addLayout(save_label_layout)
+
+        self.path_entry = QLineEdit()
+        self.path_entry.setText(get_desktop_file())
+        self.previous_path = self.path_entry.text()
+        self.path_entry.textChanged.connect(self.check_path)
+        save_layout_vertical.addWidget(self.path_entry)
+
+        browse_button = QPushButton("📁")
+        browse_button.setFont(QFont("Default", 16))
+        browse_button.setToolTip("Ouvrir un dossier")
+        browse_button.clicked.connect(self.browse_save_location)
+        browse_button.setFixedWidth(50)
+        browse_button.setFixedHeight(50)
+        save_layout.addLayout(save_layout_vertical)
+        save_layout.addWidget(browse_button)
+        main_layout.addLayout(save_layout)
+
+        # Auto option section
+        auto_output_layout = QHBoxLayout()
+        self.auto_output = QCheckBox()
+        self.auto_output.setChecked(True)
+        auto_output_label = QLabel("Sortie automatique")
+        auto_output_label.setFont(QFont("Default", 12))
+        self.auto_output.stateChanged.connect(self.handle_auto_output)
+        auto_output_layout.addWidget(self.auto_output)
+        auto_output_layout.addWidget(auto_output_label)
+        auto_output_layout.addStretch()
+        main_layout.addLayout(auto_output_layout)
+
+        # Buttons section
+        button_layout = QHBoxLayout()
+        cancel_button = QPushButton("Annuler")
+        cancel_button.clicked.connect(self.app.close)
+        self.validate_button = QPushButton("Récupérer")
+        self.validate_button.setDefault(True)
+        self.validate_button.clicked.connect(self.scrap)
+        self.validate_button.setEnabled(False)
+        button_layout.addWidget(cancel_button)
+        button_layout.addWidget(self.validate_button)
+        main_layout.addLayout(button_layout)
 
 
-    def run_sync(self):
-        logger.info("Starting GUI synchronously")
-        self.mainloop()
-        return self.result_url, self.result_path
+        main_layout.addSpacerItem(
+            QSpacerItem(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        )
+        # Initial path validation
+        self.check_path(self.path_entry.text())
 
-    @staticmethod
-    def center_window(window):
-        window.update_idletasks()
-        screen_width = window.winfo_screenwidth()
-        screen_height = window.winfo_screenheight()
-        size = tuple(int(x) for x in window.geometry().split('+')[0].split('x'))
-        x = screen_width // 2 - size[0] // 2
-        y = screen_height // 2 - size[1] // 2
-        window.geometry(f"{size[0]}x{size[1]}+{x}+{y}")
+    def center_window(self):
+        frame_geometry = self.frameGeometry()
+        screen_center = self.screen().availableGeometry().center()
+        frame_geometry.moveCenter(screen_center)
+        self.move(frame_geometry.topLeft())
+
+
+class GUIManager(QApplication):
+    def __init__(self):
+        super().__init__(sys.argv)
+        self.ready = False
+
+        self.result_url: str | None = None
+        self.result_path: str | None = None
+        self.page_manager: PageManagerWorker | None = None
+        self.window: MainWindow | None = None
+
+        self._preview_task: asyncio.Task | None = None
+
+    def init(self):
+        if self.ready:
+            return
+        logger.info("Initialising the GUI")
+
+        self.page_manager = PageManagerWorker()
+        self.page_manager.init_nowait()
+
+        self.window = MainWindow(self)
+        self.ready = True
+
+    def close(self):
+        if not self.ready:
+            return
+        logger.info("Closing the GUI")
+        if self.window:
+            self.window.close()
+        if self.page_manager:
+            self.page_manager.close_nowait()
+        self.ready = False
+
+    async def scrap(self):
+        logger.info(f"URL validated : {self.result_url}")
+        logger.info(f"Path validated : {self.result_path}")
+        if self.page_manager and self.result_url:
+            await self.page_manager.run(self.result_url)
+
+    def fetch_title(self):
+        async def _fetch_title(url: str):
+            if not self.page_manager:
+                return
+            try:
+                self.window.preview_spinner.setVisible(True)
+                self.window.preview_title_label.setText("")
+                title = await self.page_manager.fetch_title(url) or "-"
+                self.window.preview_title_label.setText(title)
+                self.window.update_path_with_title(title)
+            except asyncio.CancelledError:
+                # Tâche annulée: ne rien afficher
+                pass
+            except Exception as e:
+                logger.warning(f"Preview title failed: {e}")
+                self.window.preview_title_label.setText("Erreur lors du chargement du titre")
+            finally:
+                # Cacher le spinner si présent
+                self.window.preview_spinner.setVisible(False)
+
+        if self._preview_task and not self._preview_task.done():
+            self._preview_task.cancel()
+
+        self._preview_task = asyncio.ensure_future(_fetch_title(self.result_url))
+
+    def run(self):
+        logger.info("Starting the GUI")
+        self.window.show()
+        QtAsyncio.run(handle_sigint=True)
