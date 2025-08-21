@@ -279,14 +279,14 @@ class GUIManager(QApplication):
         if self.window:
             self.window.close()
         if self.page_manager:
-            self.page_manager.close_nowait()
+            self.page_manager.close()
         self.ready = False
 
     async def scrap(self):
         logger.info(f"URL validated : {self.result_url}")
         logger.info(f"Path validated : {self.result_path}")
         if self.page_manager and self.result_url:
-            await self.page_manager.run(self.result_url)
+            await self.page_manager.run_async(self.result_url)
 
     def fetch_title(self):
         async def _fetch_title(url: str):
@@ -295,15 +295,12 @@ class GUIManager(QApplication):
             try:
                 self.window.preview_spinner.setVisible(True)
                 self.window.preview_title_label.setText("")
-                title = await self.page_manager.fetch_title(url) or "-"
+                title = await self.page_manager.fetch_title_async(url) or "-"
                 self.window.preview_title_label.setText(title)
                 self.window.update_path_with_title(title)
             except asyncio.CancelledError:
                 # Tâche annulée: ne rien afficher
                 pass
-            except Exception as e:
-                logger.warning(f"Preview title failed: {e}")
-                self.window.preview_title_label.setText("Erreur lors du chargement du titre")
             finally:
                 self.window.preview_spinner.setVisible(False)
 

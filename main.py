@@ -12,6 +12,7 @@ runpy.run_path(".venv/bin/activate_this.py")
 logger = logging.getLogger(__name__)
 gui_manager: GUIManager
 
+
 def run_app():
     global gui_manager
 
@@ -21,7 +22,6 @@ def run_app():
 
 def main():
     logger.info("Starting the application")
-    os.system("playwright install")
 
     try:
         run_app()

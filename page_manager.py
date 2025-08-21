@@ -1,29 +1,33 @@
-import logging
-from typing import Literal
-from concurrent.futures import ThreadPoolExecutor, Future
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import logging
+import os
+from typing import Literal
 
 from playwright.sync_api import sync_playwright, Playwright, Browser, Page
 
 logger = logging.getLogger(__name__)
 
+BrowserTypeAlias = Literal["chromium", "firefox", "webkit"]
+
 class PageManager:
     def __init__(self):
-        self.running = False
+        self.ready = False
         self.pw: Playwright | None = None
         self.browser: Browser | None = None
         self.page: Page | None = None
 
-    def init(self, browser: Literal["chromium", "firefox", "webkit"] = "chromium"):
+    def _init(self, browser: BrowserTypeAlias = "chromium"):
         logger.info("Initialising the browser and the page")
+        os.system("playwright install")
         self.pw = sync_playwright().start()
         self.browser = getattr(self.pw, browser).launch()
         self.page = self.browser.new_page()
-        self.running = True
+        self.ready = True
         logger.info("Browser and page initialised")
 
     def close(self):
-        if not self.running:
+        if not self.ready:
             return
         if self.browser:
             logger.info("Closing the browser")
@@ -31,102 +35,77 @@ class PageManager:
         if self.pw:
             logger.info("Closing the playwright")
             self.pw.stop()
-        self.running = False
+        self.ready = False
 
-    def run(self, page: str):
-        if not self.running:
+    def _run(self, url: str):
+        if not self.ready:
             logger.warning("run() called while PageManager is not initialised")
             return
         logger.info("Starting the scrapper")
-        self.page.goto(page)
+        self.page.goto(url)
         title = self.page.title()
         print(title)
 
-    def get_title(self, url: str) -> str:
-        if not self.running:
+    def _fetch_title(self, url: str) -> str:
+        if not self.ready:
             logger.warning("get_title() called while PageManager is not initialised")
-            return ""
+            return "-"
 
         logger.info(f"Fetching selector content for: {url}")
         selector = "#aside-container-unique > div.XkhEk > h1 > span"
 
-        try:
-            self.page.goto(url)
-            self.page.wait_for_load_state("domcontentloaded")
+        self.page.goto(url)
+        self.page.wait_for_load_state("domcontentloaded")
 
-            page_title = self.page.title()
-            if page_title.strip() == "Page not found (404) | MuseScore.com":
-                logger.info("Detected 404 page")
-                return "Page inexistante"
-
-            el = self.page.wait_for_selector(selector, state="attached", timeout=10000)
-            if not el:
-                logger.warning(f"Selector not found: {selector}")
-                return "Page inexistante"
-
-            text = el.text_content()
-            return text.strip() if text else "Page inexistante"
-
-        except Exception as e:
-            logger.exception(f"Error while fetching selector content: {e}")
+        page_title = self.page.title()
+        if page_title.strip() == "Page not found (404) | MuseScore.com":
+            logger.warning("Detected 404 page")
             return "Page inexistante"
 
+        el = self.page.wait_for_selector(selector, state="attached", timeout=5000)
+        if not el:
+            logger.warning(f"Selector not found: {selector}")
+            return "Page inexistante"
 
-class PageManagerWorker:
-    """
-    Proxy thread-safe: exécute toutes les méthodes de PageManager
-    dans un seul thread dédié (toujours le même).
-    Offre des variantes async (awaitables) et nowait (non-bloquantes).
-    """
-    def __init__(self, default_browser: Literal["chromium", "firefox", "webkit"] = "chromium"):
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="page-manager")
-        self._pm = PageManager()
-        self._default_browser = default_browser
-        self._closed = False
-        self._init_future: Future | None = None
+        text = el.text_content()
+        return text.strip() if text else "Page inexistante"
 
-    def _submit(self, fn, *args, **kwargs) -> Future:
-        if self._closed and fn is not self._pm.close:
-            raise RuntimeError("PageManagerWorker is already closed")
-        return self._executor.submit(fn, *args, **kwargs)
 
-    async def init(self, browser: Literal["chromium", "firefox", "webkit"] | None = None):
-        if self._init_future is None:
-            self._init_future = self._submit(self._pm.init, browser or self._default_browser)
-        await asyncio.wrap_future(self._init_future)
+class PageManagerWorker(PageManager):
+    def __init__(self):
+        super().__init__()
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._init_future: asyncio.Future | None = None
+        self._init_event: asyncio.Event | None = None
 
-    def init_nowait(self, browser: Literal["chromium", "firefox", "webkit"] | None = None) -> Future:
-        self._init_future = self._submit(self._pm.init, browser or self._default_browser)
-        return self._init_future
+    def _submit(self, func, *args, **kwargs) -> asyncio.Future:
+        loop = asyncio.get_running_loop()
+        return loop.run_in_executor(
+            self._executor,
+            lambda: func(*args, **kwargs)
+        )
 
-    async def run(self, url: str):
-        if self._init_future is not None and not self._init_future.done():
-            await asyncio.wrap_future(self._init_future)
-        fut = self._submit(self._pm.run, url)
-        await asyncio.wrap_future(fut)
+    def init_nowait(self, browser: BrowserTypeAlias = "chromium") -> asyncio.Event:
+        self._init_future = self._executor.submit(self._init, browser)
+        self._init_event = asyncio.Event()
+        self._init_future.add_done_callback(lambda _: self._init_event.set())
+        return self._init_event
 
-    def run_nowait(self, url: str) -> Future:
-        return self._submit(self._pm.run, url)
+    async def run_async(self, url: str) -> str:
+        await asyncio.shield(self._init_future)
+        return await self._submit(self._run, url)
 
-    async def fetch_title(self, url: str) -> str:
-        if self._init_future is not None and not self._init_future.done():
-            await asyncio.wrap_future(self._init_future)
-        fut = self._submit(self._pm.get_title, url)
-        return await asyncio.wrap_future(fut)
+    def run_nowait(self, url: str) -> asyncio.Event:
+        def run_wait():
+            self._init_event.wait()
+            return self._run(url)
+        future = self._executor.submit(run_wait)
+        event = asyncio.Event()
+        future.add_done_callback(lambda _: event.set())
+        return event
 
-    def fetch_title_nowait(self, url: str) -> Future:
-        return self._submit(self._pm.get_title, url)
-
-    async def close(self):
-        try:
-            fut = self._submit(self._pm.close)
-            await asyncio.wrap_future(fut)
-        finally:
-            self._closed = True
-            self._executor.shutdown(wait=False, cancel_futures=True)
-
-    def close_nowait(self) -> Future:
-        fut = self._submit(self._pm.close)
-        self._closed = True
-        self._executor.shutdown(wait=False, cancel_futures=True)
-        return fut
+    async def fetch_title_async(self, url: str) -> str:
+        print(self._init_future)
+        print(self._init_event)
+        await asyncio.shield(self._init_future)
+        return await self._submit(self._fetch_title, url)
