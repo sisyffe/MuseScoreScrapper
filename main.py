@@ -8,6 +8,7 @@ from gui_manager import GUIManager
 
 logging.basicConfig(**settings.LOGGING_CONFIG)
 runpy.run_path(".venv/bin/activate_this.py")
+os.system("playwright install")
 
 logger = logging.getLogger(__name__)
 gui_manager: GUIManager
