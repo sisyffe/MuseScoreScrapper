@@ -3,6 +3,7 @@ import os
 import queue
 from typing import Type
 
+import settings
 from utils import serialize_send, Message, Order
 
 
@@ -54,15 +55,17 @@ class Handler:
     def send_message(self, to: str, what: Order):
         serialize_send(self._worker.address, self._send_queue, to=to, what=what)
 
-    def listen_step(self, *, block: bool = False, delegate_signal: str | None = None):
+    def listen_step(self, *, block: bool = False,
+                    timeout_step: float | None = settings.DEFAULT_REFRESH_STEP_TIMEOUT_SEC):
+        what = None
         try:
-            sender, receiver, what = self._recv_queue.get(block=block)
+            sender, receiver, what = self._recv_queue.get(block=block, timeout=timeout_step)
         except queue.Empty:
             return
-
-        if os.getppid() != self._ppid or what == "_shutdown":
-            self._running = False
-            return
+        finally:
+            if os.getppid() != self._ppid or what == "_shutdown":
+                self._running = False
+                return
 
         func, args, kwargs = what if isinstance(what, tuple) else (what, (), {})
         assert receiver == self._worker.address
@@ -71,14 +74,10 @@ class Handler:
             raise RuntimeError(f"Unknown method {func}")
 
         result_messages = getattr(self._worker, func)(*args, **kwargs)
-        if func == delegate_signal:
-            self._running = False
-            return
-
         for sender, receiver, what in result_messages:
             serialize_send(sender, self._send_queue, to=receiver, what=what)
 
-    def listen(self, *, delegate_signal: str | None = None):
+    def listen(self, timeout_step: float | None = settings.DEFAULT_REFRESH_STEP_TIMEOUT_SEC):
         self._running = True
         while self._running:
-            self.listen_step(block=True, delegate_signal=delegate_signal)
+            self.listen_step(block=True, timeout_step=timeout_step)

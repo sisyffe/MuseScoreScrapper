@@ -1,5 +1,6 @@
 import logging
 import multiprocessing as mp
+import os
 from typing import Literal
 
 from playwright.sync_api import sync_playwright, Playwright, Browser, Page
@@ -26,6 +27,7 @@ class PageManager(Worker):
         if self._is_init:
             raise RuntimeError("Cannot initialize PageManager twice")
         logger.info("Initialising the browser and the page")
+        os.system("playwright install")
         self.pw = sync_playwright().start()
         self.browser = getattr(self.pw, browser).launch()
         self.page = self.browser.new_page()

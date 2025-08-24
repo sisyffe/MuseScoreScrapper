@@ -1,5 +1,4 @@
 import logging
-import os
 import runpy
 
 import settings
@@ -7,7 +6,6 @@ from handler_manager import HandlerManager
 
 logging.basicConfig(**settings.LOGGING_CONFIG)
 runpy.run_path(".venv/bin/activate_this.py")
-os.system("playwright install")
 
 logger = logging.getLogger(__name__)
 handler_manager: HandlerManager

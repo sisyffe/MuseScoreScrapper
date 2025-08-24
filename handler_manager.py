@@ -1,5 +1,6 @@
 import logging
 import multiprocessing as mp
+import multiprocessing.connection
 import os
 
 from utils import serialize_send, Order
@@ -17,7 +18,6 @@ class HandlerManager:
         self._workers: dict[str, tuple[mp.Queue, mp.Process]] = {}
         self._recv_queue = mp.Queue()
         self._running_count = 0
-        self._is_stopping = mp.Event()
 
     def start_all_workers(self):
         for name, worker_func in self.WORKERS.items():
@@ -27,6 +27,7 @@ class HandlerManager:
                                                           "ppid": os.getpid()})
             self._workers[name] = send_queue, proc
             proc.start()
+            self._running_count += 1
 
     def init_all_workers(self):
         for name, (send_queue, proc) in self._workers.items():
@@ -39,13 +40,15 @@ class HandlerManager:
     def wait_all_workers(self):
         for name, (send_queue, proc) in self._workers.items():
             proc.join(timeout=1.0)
-            if not proc.is_alive():
+            if proc.is_alive():
                 proc.terminate()
+                proc.join()
+            send_queue.close()
+        self._recv_queue.close()
 
     def handle_message(self, sender: str, what: Order) -> None:
         if what == "finished_init":
             logger.info(f"Finished initialization: {sender}")
-            self._running_count += 1
             if sender == "gui":
                 serialize_send(self.ADDRESS, self._workers["gui"][0], to="gui", what="mainloop")
         elif what == "finished_close":
@@ -54,13 +57,12 @@ class HandlerManager:
             self._running_count -= 1
         elif what == "request_shutdown":
             logger.info(f"Received shutdown request: {sender}")
-            self._is_stopping.set()
             self.close_all_workers()
 
     def listen_all_workers(self):
         self.init_all_workers()
 
-        while self._running_count > 0 or not self._is_stopping.is_set():
+        while self._running_count > 0:
             message = self._recv_queue.get()
             sender, receiver, what = message
 

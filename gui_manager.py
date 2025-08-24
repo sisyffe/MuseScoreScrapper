@@ -228,7 +228,7 @@ class MainWindow(QMainWindow):
         # Buttons section
         button_layout = QHBoxLayout()
         cancel_button = QPushButton("Annuler")
-        cancel_button.clicked.connect(self.app.close)
+        cancel_button.clicked.connect(self.close)
         self.validate_button = QPushButton("Récupérer")
         self.validate_button.setDefault(True)
         self.validate_button.clicked.connect(self.scrap)
@@ -275,7 +275,7 @@ class GUIManager(Worker, QApplication):
         if not self._is_init or not self._ready:
             raise RuntimeError("Cannot close GUI before initialization")
         logger.info("Closing the GUI")
-        if self.window:
+        if self.window.isActiveWindow():
             self.window.close()
         return super().close()
 
@@ -309,4 +309,4 @@ class GUIManager(Worker, QApplication):
 
 def multiprocess_main(send_queue: mp.Queue, recv_queue: mp.Queue, ppid: int):
     gui_handler = Handler(GUIManager, "gui", send_queue, recv_queue, ppid)
-    gui_handler.listen(delegate_signal="mainloop")
+    gui_handler.listen()
