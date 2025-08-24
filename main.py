@@ -22,5 +22,6 @@ def main():
         logger.critical(f"An error occurred (exiting) : {str(e)}")
         raise
 
+
 if __name__ == "__main__":
     main()

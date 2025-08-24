@@ -74,7 +74,6 @@ class HandlerManager:
             else:
                 raise RuntimeError(f"Worker {receiver} not found")
 
-
     def run(self):
         self.start_all_workers()
         self.listen_all_workers()
