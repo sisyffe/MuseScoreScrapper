@@ -1,8 +1,9 @@
 import asyncio
 import logging
+import multiprocessing as mp
+from pathlib import Path, UnsupportedOperation
 import re
 import sys
-from pathlib import Path, UnsupportedOperation
 
 import PySide6.QtAsyncio as QtAsyncio
 from PySide6.QtCore import Qt, QTimer, QStandardPaths
@@ -14,7 +15,8 @@ from PySide6.QtWidgets import (
 )
 
 import settings
-from page_manager import PageManagerWorker
+from utils import Message
+from worker import Worker, Handler
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +48,7 @@ class MainWindow(QMainWindow):
         self.center_window()
 
     def scrap(self):
-        asyncio.ensure_future(self.app.scrap())
+        self.app.scrap()
 
     def fetch_title(self):
         self.app.fetch_title()
@@ -249,67 +251,62 @@ class MainWindow(QMainWindow):
         self.move(frame_geometry.topLeft())
 
 
-class GUIManager(QApplication):
-    def __init__(self):
-        super().__init__(sys.argv)
-        self.ready = False
+class GUIManager(Worker, QApplication):
+    METHODS = Worker.METHODS + ["mainloop", "set_title"]
+
+    def __init__(self, address: str, handler: Handler):
+        QApplication.__init__(self, sys.argv)
+        Worker.__init__(self, address, handler)
 
         self.result_url: str | None = None
         self.result_path: str | None = None
-        self.page_manager: PageManagerWorker | None = None
         self.window: MainWindow | None = None
 
         self._preview_task: asyncio.Task | None = None
 
-    def init(self):
-        if self.ready:
-            return
+    def init(self) -> list[Message]:
+        if self._is_init:
+            raise RuntimeError("Cannot initialize GUI twice")
         logger.info("Initialising the GUI")
-
-        self.page_manager = PageManagerWorker()
-        self.page_manager.init_nowait()
-
         self.window = MainWindow(self)
-        self.ready = True
+        return super().init()
 
-    def close(self):
-        if not self.ready:
-            return
+    def close(self) -> list[Message]:
+        if not self._is_init or not self._ready:
+            raise RuntimeError("Cannot close GUI before initialization")
         logger.info("Closing the GUI")
         if self.window:
             self.window.close()
-        if self.page_manager:
-            self.page_manager.close()
-        self.ready = False
+        return super().close()
 
-    async def scrap(self):
+    def scrap(self):
         logger.info(f"URL validated : {self.result_url}")
         logger.info(f"Path validated : {self.result_path}")
-        if self.page_manager and self.result_url:
-            await self.page_manager.run_async(self.result_url)
+        self._handler.send_message("page", ("scrap", (self.result_url,), {}))
 
     def fetch_title(self):
-        async def _fetch_title(url: str):
-            if not self.page_manager:
-                return
-            try:
-                self.window.preview_spinner.setVisible(True)
-                self.window.preview_title_label.setText("")
-                title = await self.page_manager.fetch_title_async(url) or "-"
-                self.window.preview_title_label.setText(title)
-                self.window.update_path_with_title(title)
-            except asyncio.CancelledError:
-                # Tâche annulée: ne rien afficher
-                pass
-            finally:
-                self.window.preview_spinner.setVisible(False)
+        self.window.preview_spinner.setVisible(True)
+        self.window.preview_title_label.setText("")
+        self._handler.send_message("page", ("fetch_title", (self.result_url,), {}))
 
-        if self._preview_task and not self._preview_task.done():
-            self._preview_task.cancel()
+    def set_title(self, title: str) -> list[Message]:
+        self.window.preview_title_label.setText(title)
+        self.window.update_path_with_title(title)
+        self.window.preview_spinner.setVisible(False)
+        return []
 
-        self._preview_task = asyncio.ensure_future(_fetch_title(self.result_url))
-
-    def run(self):
+    def mainloop(self) -> list[Message]:
         logger.info("Starting the GUI")
         self.window.show()
+
+        timer = QTimer()
+        timer.timeout.connect(self._handler.listen_step)
+        timer.start(int(1000 / 60))
+
         QtAsyncio.run(handle_sigint=True)
+        return [(self._address, "manager", "request_shutdown")]
+
+
+def multiprocess_main(send_queue: mp.Queue, recv_queue: mp.Queue, ppid: int):
+    gui_handler = Handler(GUIManager, "gui", send_queue, recv_queue, ppid)
+    gui_handler.listen(delegate_signal="mainloop")

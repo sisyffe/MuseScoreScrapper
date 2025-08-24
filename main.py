@@ -1,36 +1,28 @@
-import asyncio
 import logging
 import os
 import runpy
 
 import settings
-from gui_manager import GUIManager
+from handler_manager import HandlerManager
 
 logging.basicConfig(**settings.LOGGING_CONFIG)
 runpy.run_path(".venv/bin/activate_this.py")
 os.system("playwright install")
 
 logger = logging.getLogger(__name__)
-gui_manager: GUIManager
+handler_manager: HandlerManager
 
-
-def run_app():
-    global gui_manager
-
-    gui_manager = GUIManager()
-    gui_manager.init()
-    gui_manager.run()
 
 def main():
+    global handler_manager
     logger.info("Starting the application")
 
     try:
-        run_app()
+        handler_manager = HandlerManager()
+        handler_manager.run()
     except Exception as e:
         logger.critical(f"An error occurred (exiting) : {str(e)}")
         raise
-    finally:
-        gui_manager.close()
 
 if __name__ == "__main__":
     main()
